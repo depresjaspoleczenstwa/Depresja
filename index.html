@@ -7,12 +7,26 @@
 09:00 13.10.2026
 
   <script type="module">
-    // Import the functions you need from the SDKs you need
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/13.0.0/firebase-app.js";
-    // TODO: Add SDKs for Firebase products that you want to use
-    // https://firebase.google.com/docs/web/setup#available-libraries
+    import {
+      initializeApp
+    } from "https://www.gstatic.com/firebasejs/13.0.0/firebase-app.js";
 
-    // Your web app's Firebase configuration
+    import {
+      getAuth,
+      createUserWithEmailAndPassword,
+      signInWithEmailAndPassword,
+      signOut,
+      onAuthStateChanged
+    } from "https://www.gstatic.com/firebasejs/13.0.0/firebase-auth.js";
+
+    import {
+      getDatabase,
+      ref,
+      onValue,
+      runTransaction
+    } from "https://www.gstatic.com/firebasejs/13.0.0/firebase-database.js";
+
+    // KONFIGURACJA FIREBASE
     const firebaseConfig = {
       apiKey: "AIzaSyDM5ZiidNR8rtw83DtY-cbG0gIEFkohDbM",
       authDomain: "depresjaspoleczenstwa-ef823.firebaseapp.com",
@@ -22,12 +36,183 @@
       appId: "1:586114872279:web:b0d0fbb47c35cea2471192"
     };
 
-    // Initialize Firebase
     const app = initializeApp(firebaseConfig);
-  </script>
+    const auth = getAuth(app);
 
-</head>
-<body>
+    // Wklej URL swojej Realtime Database z Firebase Console.
+    // Przykładowe formaty:
+    // https://NAZWA-BAZY-default-rtdb.europe-west1.firebasedatabase.app
+    // https://NAZWA-BAZY-default-rtdb.firebaseio.com
+    const db = getDatabase(app);
+
+    const authSection = document.getElementById("authSection");
+    const counterSection = document.getElementById("counterSection");
+    const counterElement = document.getElementById("counter");
+    const status = document.getElementById("status");
+
+    const plusButton = document.getElementById("plus");
+    const minusButton = document.getElementById("minus");
+    const logoutButton = document.getElementById("logoutButton");
+
+    let counterRef = null;
+    let unsubscribeCounter = null;
+    let busy = false;
+    let authVersion = 0;
+
+    function updateButtons() {
+      plusButton.disabled = !counterRef || busy;
+      minusButton.disabled = !counterRef || busy;
+    }
+
+    // REJESTRACJA
+    document.getElementById("registerForm")
+      .addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        const email = document.getElementById("registerEmail").value.trim();
+        const password = document.getElementById("registerPassword").value;
+
+        status.textContent = "Tworzenie konta...";
+
+        try {
+          await createUserWithEmailAndPassword(auth, email, password);
+          status.textContent = "Konto zostało utworzone.";
+        } catch (error) {
+          status.textContent = "Błąd rejestracji: " + error.message;
+        }
+      });
+
+    // LOGOWANIE
+    document.getElementById("loginForm")
+      .addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        const email = document.getElementById("loginEmail").value.trim();
+        const password = document.getElementById("loginPassword").value;
+
+        status.textContent = "Logowanie...";
+
+        try {
+          await signInWithEmailAndPassword(auth, email, password);
+          status.textContent = "Zalogowano pomyślnie.";
+        } catch (error) {
+          status.textContent = "Błąd logowania: " + error.message;
+        }
+      });
+
+    // ZMIANA LICZNIKA
+    async function changeCounter(amount) {
+      if (!counterRef || busy) return;
+
+      const targetRef = counterRef;
+      const version = authVersion;
+
+      busy = true;
+      updateButtons();
+
+      try {
+        await runTransaction(targetRef, (currentValue) => {
+          if (currentValue === null) return 0;
+          if (typeof currentValue !== "number") return;
+          return currentValue + amount;
+        });
+
+        if (version === authVersion) {
+          status.textContent = "Licznik zapisany.";
+        }
+      } catch (error) {
+        if (version === authVersion) {
+          status.textContent = "Błąd zapisu: " + error.message;
+        }
+      } finally {
+        busy = false;
+        updateButtons();
+      }
+    }
+
+    plusButton.addEventListener("click", () => changeCounter(1));
+    minusButton.addEventListener("click", () => changeCounter(-1));
+
+    // WYLOGOWANIE
+    logoutButton.addEventListener("click", async () => {
+      try {
+        await signOut(auth);
+      } catch (error) {
+        status.textContent = "Błąd wylogowania: " + error.message;
+      }
+    });
+
+    // OBSŁUGA ZALOGOWANIA I LICZNIKA
+    onAuthStateChanged(auth, async (user) => {
+      const version = ++authVersion;
+
+      if (unsubscribeCounter) {
+        unsubscribeCounter();
+        unsubscribeCounter = null;
+      }
+
+      counterRef = null;
+      busy = false;
+      updateButtons();
+
+      authSection.hidden = !!user;
+      counterSection.hidden = !user;
+
+      if (!user) {
+        counterElement.textContent = "0";
+        status.textContent = "Zaloguj się, aby korzystać z licznika.";
+        return;
+      }
+
+      status.textContent = "Wczytywanie licznika...";
+
+      // Osobna ścieżka dla każdego konta Firebase.
+      const userCounterRef = ref(db, "users/" + user.uid + "/x");
+
+      try {
+        // Utwórz wartość początkową tylko dla nowego licznika.
+        const result = await runTransaction(
+          userCounterRef,
+          (currentValue) => {
+            return currentValue === null ? 0 : currentValue;
+          }
+        );
+
+        if (version !== authVersion) return;
+
+        if (!result.committed) {
+          throw new Error("Nie udało się zapisać wartości początkowej.");
+        }
+
+        counterRef = userCounterRef;
+        updateButtons();
+
+        unsubscribeCounter = onValue(
+          userCounterRef,
+          (snapshot) => {
+            if (version !== authVersion) return;
+
+            const value = snapshot.val();
+            counterElement.textContent =
+              typeof value === "number" ? value : 0;
+
+            status.textContent = "Zalogowano jako " + user.email;
+          },
+          (error) => {
+            if (version !== authVersion) return;
+            status.textContent = "Błąd odczytu: " + error.message;
+          }
+        );
+      } catch (error) {
+        if (version !== authVersion) return;
+
+        counterRef = null;
+        updateButtons();
+        status.textContent =
+          "Nie udało się wczytać licznika: " + error.message;
+      }
+    });
+  </script>
 
 </body>
 </html>
